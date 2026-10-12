@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="theme-color" content="#101a1c">
+<meta name="description" content="Download and validate Dukascopy tick archives, then query and export exact time ranges locally.">
+<title>TickVault — Historical ticks, close at hand</title><link rel="icon" href="favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="style.css">
+</head>
+<body id="top">
+<a class="skip" href="#main">Skip to content</a>
+<header class="header"><a class="brand" href="#top"><span class="mark">▥</span>tick<span>vault</span></a><nav><a class="selected" href="#top">Overview</a><a href="#getting-started">Getting started</a><a href="#reliability">Reliability</a><a href="https://github.com/keyhankamyar/TickVault">GitHub ↗</a></nav><a class="head-button" href="#install">Get started <b>→</b></a></header>
+<main id="main">
+<section class="hero wrap"><div class="hero-text"><div class="eyebrow"><i></i> OPEN-SOURCE PYTHON LIBRARY</div><h1>Market history,<br><em>kept within reach.</em></h1><p class="lead">Download Dukascopy historical tick files, validate your archive, then query only the time you need. Your verified data stays on your machine.</p><div class="actions"><a class="button primary" href="#install">Get started <b>→</b></a><a class="button quiet" href="https://github.com/keyhankamyar/TickVault">Explore the source ↗</a></div><div class="meta">PYTHON 3.11+ <i></i> SQLITE INCLUDED <i></i> HDF5 OPTIONAL</div></div>
+<div class="chart-card"><div class="chart-heading"><span><i></i> LOCAL ARCHIVE</span><span>EURUSD · 12 JAN 2024</span></div><div class="chart"><div class="axis"><span>1.0950</span><span>1.0925</span><span>1.0900</span><span>1.0875</span></div><svg viewBox="0 0 440 180" preserveAspectRatio="none" aria-label="Illustrative price line"><defs><linearGradient id="fill" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#7dddb5" stop-opacity=".27"/><stop offset="1" stop-color="#7dddb5" stop-opacity="0"/></linearGradient></defs><path fill="url(#fill)" d="M0 130 C18 120 20 92 38 104 S58 136 77 118 S98 96 115 111 S132 135 152 103 S177 72 192 84 S210 113 226 98 S246 75 263 91 S285 118 301 84 S326 62 342 70 S362 103 379 78 S402 45 415 56 S431 68 440 38 V180 H0Z"/><path d="M0 130 C18 120 20 92 38 104 S58 136 77 118 S98 96 115 111 S132 135 152 103 S177 72 192 84 S210 113 226 98 S246 75 263 91 S285 118 301 84 S326 62 342 70 S362 103 379 78 S402 45 415 56 S431 68 440 38" fill="none" stroke="#82e0b8" stroke-width="2.5"/><line x1="283" y1="0" x2="283" y2="180" stroke="#e8bf78" stroke-dasharray="4 5"/><circle cx="283" cy="91" r="5" fill="#e8bf78"/></svg><span class="range">● &nbsp;12:30–12:32 UTC <b>2 MIN</b></span></div><div class="chart-foot"><span><b>1,284</b> example ticks</span><span class="cache">● FROM LOCAL CACHE</span></div><div class="caption">Illustrative data · no live prices shown</div></div></section>
+
+<section class="notice wrap"><b class="notice-icon">i</b><p><strong>Short query, hourly source.</strong> Dukascopy serves hourly files. An uncached two-minute query can download one entire compressed hour; the exact two-minute filter applies when reading. Cached queries need no provider request.</p><a href="#access">Understand the limits →</a></section>
+
+<section class="section wrap"><div class="section-title"><div><div class="eyebrow">FROM SOURCE TO RESEARCH</div><h2>A careful path from ticks to tables.</h2></div><p>Keep the compressed archive. Decode bounded windows on demand, and export when another tool needs the data.</p></div><div class="cards four"><article><div class="number">01 <span>FETCH</span></div><div class="card-icon">↓</div><h3>Request with restraint</h3><p>Shared pacing, request budgets, cooldowns and a one-request access probe help avoid unnecessary calls.</p><a href="#limits">Request controls →</a></article><article><div class="number">02 <span>VERIFY</span></div><div class="card-icon">✓</div><h3>Keep valid files</h3><p>Validate BI5 content before atomic publication; record downloaded, empty and failed hours separately.</p><a href="#integrity">Integrity and recovery →</a></article><article><div class="number">03 <span>QUERY</span></div><div class="card-icon">⌕</div><h3>Read an exact window</h3><p>Filter UTC bounds and stream in frames with serial, thread or process decoding.</p><a href="#read">Read and decode →</a></article><article><div class="number">04 <span>EXPORT</span></div><div class="card-icon">↗</div><h3>Share with your tools</h3><p>Stream into indexed SQLite, optional HDF5 or CSV while preserving repeated tick times.</p><a href="#export">Export data →</a></article></div></section>
+
+<section class="dark-band"><div class="wrap dark-grid"><div><div class="eyebrow">LOCAL-FIRST RESEARCH</div><h2>Keep data close.<br><em>Keep requests bounded.</em></h2><p>Once an hour is cached and validated, reading and exporting it are local operations. Resume jobs retain progress and show when provider access can be tried again.</p><a class="light-link" href="#jobs">Explore resumable jobs →</a></div><div class="terminal"><div class="term-head">● &nbsp;● &nbsp;● &nbsp; LOCAL WORKFLOW <small>NO LIVE REQUEST</small></div><pre><b>$</b> tick-vault status EURUSD<br>{<br>  "downloaded": 24,<br>  "no_data": 1,<br>  "failed": 0,<br>  "total": 25<br>}<br><br><b>$</b> tick-vault read EURUSD<br>    --start 2024-01-12T12:30Z<br>    --end 2024-01-12T12:32Z</pre><div class="term-foot">Status, reads and exports use local files.</div></div></div></section>
+
+<section class="section wrap"><div class="section-title"><div><div class="eyebrow">BUILT FOR REAL WORKFLOWS</div><h2>Practical tools around the archive.</h2></div><a class="text-link" href="#getting-started">Browse all capabilities →</a></div><div class="features"><article><b>01</b><div><h3>Resumable downloads</h3><p>Durable job status, partial progress and clear waiting states.</p></div></article><article><b>02</b><div><h3>Shared provider controls</h3><p>Cooperating processes share a local budget and observed cooldown.</p></div></article><article><b>03</b><div><h3>Bounded memory</h3><p>Iterators, worker queues and batched export for large histories.</p></div></article><article><b>04</b><div><h3>Transparent outcomes</h3><p>Success, empty hours, failures and pending work stay distinct.</p></div></article><article><b>05</b><div><h3>Source identity</h3><p>A vault stays pinned to its configured feed and provenance.</p></div></article><article><b>06</b><div><h3>Python and CLI</h3><p>Use the API, terminal tools and offline tutorial in your workflow.</p></div></article></div></section>
+
+<section class="status wrap"><div class="status-label"><i></i> ACCESS VALIDATION</div><div><h2>Software tested offline.<br><span>Live feed access remains unverified.</span></h2><p>The last recorded bounded check received HTTP 429; no real tick payload was retrieved. Tests use synthetic fixtures. Future provider availability and quotas are outside the library's control.</p><a class="text-link" href="https://github.com/keyhankamyar/TickVault/blob/fix/complete-roadmap/docs/VALIDATION.md">Read the validation evidence →</a></div><aside><small>LAST RECORDED CHECK</small><b>HTTP 429</b><small>12 OCT 2026 · ONE REQUEST</small><hr><p>No retry wave.<br>No successful payload.</p></aside></section>
+
+<section class="closing wrap"><div><div class="eyebrow">START WITH A CACHED-FRIENDLY WORKFLOW</div><h2>Make the archive<br>work for you.</h2></div><div><a class="button primary" href="#install">Read the getting started guide →</a><p><a class="text-link" href="#reliability">Understand the access limits →</a></p></div></section>
+
+<section class="guide wrap" id="getting-started">
+<aside class="sidebar"><div class="eyebrow">DOCUMENTATION</div><a href="#install">Install</a><a href="#download">Download</a><a href="#read">Read and decode</a><a href="#jobs">Managed jobs</a><a href="#cli">Command line</a><a href="#export">Storage and export</a><a href="#files">Local files</a><a href="#settings">Configuration</a><div class="side-callout"><i></i>One source file covers one hour. <a href="#access">Details →</a></div></aside>
+<article class="article"><div class="eyebrow">TICKVAULT · PYTHON 3.11+</div><h1>Getting started</h1><p class="lede">Download and validate hourly tick archives, then read exact UTC windows from your local copy.</p>
+<div class="callout"><b>i</b><p><strong>First time with the feed?</strong> Start with a single explicit canary. A two-minute uncached query may transfer a whole compressed hour. <a href="#access">Read the data access note →</a></p></div>
+
+<section id="install"><div class="kicker">01 · INSTALLATION</div><h2>Install the library</h2><p>TickVault 0.3.0 is available from the repository branch and has not been published to PyPI. Install Python 3.11 or newer. HDF5 support is optional.</p><div class="code"><small>POWERSHELL · WINDOWS</small><pre><code>py -3.13 -m venv .venv
+.\.venv\Scripts\python -m pip install -e ".[dev,hdf5]"
+.\.venv\Scripts\tick-vault --help</code></pre></div><div class="code"><small>LINUX / MACOS</small><pre><code>python -m pip install -e ".[dev,hdf5]"
+python -m tick_vault --help</code></pre></div><p>For runtime only, install with <code>python -m pip install -e .</code>. Add <code>[hdf5]</code> only when you need HDF5 exports.</p></section>
+
+<section id="download"><div class="kicker">02 · DOWNLOAD</div><h2>Fetch an hourly archive</h2><p>Download calls are asynchronous. Naive datetimes mean UTC; timezone-aware values are converted to UTC. The downloader obtains complete historical hours overlapping the interval.</p><div class="code"><small>BOUNDED PYTHON EXAMPLE</small><pre><code>import asyncio
+from datetime import UTC, datetime
+from tick_vault import download_range
+
+async def main():
+    report = await download_range(
+        "EURUSD",
+        datetime(2024, 1, 15, 12, 30, tzinfo=UTC),
+        datetime(2024, 1, 15, 12, 40, tzinfo=UTC),
+        show_progress=False,
+    )
+    print(report.downloaded, report.cached, report.failed)
+
+asyncio.run(main())</code></pre></div><p>The result separates downloaded, confirmed empty, cached and failed hours. A cooperative stop keeps completed results available for the next run.</p><div class="callout warn"><b>!</b><p><strong>Range length does not set transfer size.</strong> An uncached 12:30–12:40 request obtains the enclosing hourly file. Reading later applies precise start-inclusive, end-exclusive bounds.</p></div></section>
+
+<section id="read"><div class="kicker">03 · READ AND DECODE</div><h2>Read just the interval you need</h2><p>Use the iterator to keep memory bounded. Each frame contains at most <code>batch_size</code> rows. Choose serial decoding for the simplest setup or thread/process decoding for parallel work.</p><div class="code"><small>STREAMING PYTHON</small><pre><code>from tick_vault import iter_tick_data
+
+for frame in iter_tick_data(
+    "EURUSD", start, end,
+    backend="thread", max_workers=4,
+    max_pending=8, batch_size=100_000,
+    show_progress=False,
+):
+    analyse(frame)</code></pre></div><div class="facts"><div><b>Time</b><span>UTC-naive pandas timestamps</span></div><div><b>Prices</b><span>Instrument pipet scaling</span></div><div><b>Volumes</b><span>Integer millionths</span></div><div><b>Duplicate times</b><span>Preserved as distinct ticks</span></div></div><p>Strict reads require coverage for every overlapping hour. Use <code>strict=False</code> to clip to known coverage and skip unresolved hours. Missing or corrupt files marked downloaded remain visible errors.</p></section>
+
+<section id="jobs"><div class="kicker">04 · INTERRUPTIONS</div><h2>Save and resume a managed job</h2><p>Managed jobs persist their range, settings, completed work and next eligible time. Waiting jobs do not run in the background; resume them when the recorded deadline passes.</p><div class="code"><small>ASYNC PYTHON</small><pre><code>from tick_vault import submit_download_job, resume_download_job
+
+job = await submit_download_job("EURUSD", start, end)
+print(job.state, job.completed, job.pending)
+
+# Later, after the next eligible time:
+job = await resume_download_job(job.job_id)</code></pre></div><p>States distinguish <code>queued</code>, <code>running</code>, <code>waiting_for_provider</code>, <code>waiting_for_network</code>, <code>paused</code>, <code>complete</code> and <code>needs_action</code>. Completion requires no pending or failed hours.</p></section>
+
+<section id="cli"><div class="kicker">05 · COMMAND LINE</div><h2>Use the CLI</h2><p>Use <code>tick-vault</code> or <code>python -m tick_vault</code>. Explicit times and a chosen base directory make local storage predictable.</p><div class="code"><small>EXAMPLES</small><pre><code># One permitted request, zero retries
+python -m tick_vault canary EURUSD 2024-01-02T12:00Z --base-directory ./ticks --json
+
+# Inspect local provider status; no HTTP
+python -m tick_vault provider-status --json
+
+# Run, inspect and resume a durable job
+python -m tick_vault download EURUSD 2024-01-02 --end 2024-01-03 --base-directory ./ticks --managed --json
+python -m tick_vault job-status JOB_ID
+python -m tick_vault resume JOB_ID
+
+# Read a local time window
+python -m tick_vault read EURUSD --start 2024-01-02T12:30Z --end 2024-01-02T12:32Z</code></pre></div><p>JSON reports completeness and partial progress. Ctrl-C requests a cooperative stop and preserves completed hours.</p></section>
+
+<section id="export"><div class="kicker">06 · STORAGE AND EXPORT</div><h2>Export for analysis</h2><p>SQLite is included and indexed by symbol/time. HDF5 requires PyTables; CSV is available from the CLI.</p><div class="code"><small>PYTHON</small><pre><code>from tick_vault import export_sqlite, iter_sqlite
+
+rows = export_sqlite("ticks.sqlite", "EURUSD", start, end)
+for frame in iter_sqlite("ticks.sqlite", "EURUSD", start, end):
+    analyse(frame)</code></pre></div><div class="code"><small>CLI</small><pre><code>python -m tick_vault export EURUSD ticks.sqlite --format sqlite
+python -m tick_vault export EURUSD ticks.h5 --format hdf5
+python -m tick_vault export EURUSD ticks.csv --format csv</code></pre></div><p>SQLite and HDF5 support replace, append and fail modes. CSV supports replace and fail. Append preserves duplicates; HDF5 appends must be chronological. A failed export preserves the previous output file.</p></section>
+
+<section id="files"><div class="kicker">07 · LOCAL FILES</div><h2>Know what is stored</h2><p>The base directory contains raw hourly <code>.bi5</code> files, metadata and logs. Shared provider controls, jobs and validated receipts use a separate per-user directory.</p><div class="file-list"><div><b>VAULT</b><code>tick_vault_data/downloads/</code><span>Raw hourly archive</span></div><div><b>VAULT</b><code>tick_vault_data/metadata.db</code><span>Hour status and source identity</span></div><div><b>STATE</b><code>%LOCALAPPDATA%/TickVault/provider/</code><span>Shared state on Windows</span></div><div><b>STATE</b><code>~/.local/state/tick-vault/provider/</code><span>Shared state on Linux/macOS</span></div></div><p>Cooperating local TickVault processes share this budget. Other applications and machines do not automatically participate.</p></section>
+
+<section id="settings"><div class="kicker">08 · CONFIGURATION</div><h2>Configure carefully</h2><p>Use <code>reload_config</code> for explicit overrides. Downloads capture a settings snapshot, so a later reload does not redirect active work.</p><div class="settings"><div><b>Setting</b><b>Default</b><b>Purpose</b></div><div><code>base_directory</code><span>./tick_vault_data</span><span>Cache, metadata, logs</span></div><div><code>provider_request_interval</code><span>2 seconds</span><span>Minimum start spacing</span></div><div><code>provider_max_concurrency</code><span>1 request</span><span>Aggregate in-flight ceiling</span></div><div><code>provider_minute_budget</code><span>30 starts</span><span>Rolling minute ceiling</span></div><div><code>provider_no_header_cooldown</code><span>15 minutes</span><span>Fallback pause after a throttle</span></div><div><code>fetch_max_response_bytes</code><span>64 MiB</span><span>Compressed response bound</span></div></div><p>These are client controls, not a provider quota. <a href="#limits">Read how they work →</a></p></section>
+
+<div class="end-note"><i></i><p>Want the full API and validation record?</p><a href="https://github.com/keyhankamyar/TickVault/blob/fix/complete-roadmap/README.md">Open the detailed README ↗</a></div>
+</article>
+</section>
+<section class="guide wrap" id="reliability">
+<aside class="sidebar"><div class="eyebrow">RELIABILITY</div><a href="#access">Feed access</a><a href="#limits">Request controls</a><a href="#recovery">Recovery states</a><a href="#integrity">Archive integrity</a><a href="#scope">Guarantees</a><a href="#validation">Validation</a><div class="side-callout"><i></i>Live payload access remains unverified.</div></aside>
+<article class="article"><div class="eyebrow">RESILIENCE · RATE LIMITS · DATA QUALITY</div><h1>Reliability &amp; access</h1><p class="lede">A resilient client can pace its own requests, respect observed pauses and protect local data. It cannot make an external provider available.</p>
+
+<section id="access"><div class="kicker">THE IMPORTANT LIMIT</div><h2>What happens when the feed says 429?</h2><p>HTTP 429 means the server or an intermediary is limiting requests. It might count by IP, account, route, resource or a wider service policy. A response alone rarely reveals which.</p><p>TickVault saves the pause, stops its retry wave and waits before admitting a single recovery probe. It does not switch IPs or rotate endpoints to bypass a restriction. A different route is suitable only when the provider's policy confirms an independent allowance.</p><div class="callout warn"><b>!</b><p><strong>No library can promise zero future 429s or zero errors.</strong> Provider rules, shared network traffic, service availability and local disk conditions are outside TickVault's control.</p></div><p>By default, uncached multi-hour downloads require a successful one-hour access check first. The canary makes at most one GET, with no automatic retry. Fully cached ranges remain readable and exportable locally.</p></section>
+
+<section id="limits"><div class="kicker">SHARED ADMISSION</div><h2>Controls that prevent avoidable requests</h2><p>Cooperating TickVault operations use durable local provider state. Each HTTP attempt, including a retry, needs a lease. Defaults start conservatively:</p><div class="settings"><div><b>Control</b><b>Default</b><b>Effect</b></div><div><code>Start spacing</code><span>2 seconds</span><span>Prevents bursts</span></div><div><code>In flight</code><span>1 request</span><span>Caps concurrency</span></div><div><code>Rolling budget</code><span>30 per minute</span><span>Limits recent starts</span></div><div><code>Rolling budget</code><span>1,800 per hour</span><span>Limits hourly starts</span></div><div><code>No-header pause</code><span>15 minutes</span><span>Fallback after a throttle</span></div><div><code>Retry wait</code><span>60 seconds</span><span>Longer delay is saved for later</span></div></div><p>These values are client ceilings, not a published Dukascopy allowance. Processes share the most restrictive saved settings. After a throttle, the client extends its pause and lowers its request rate.</p><p>State is local to one machine. Other software, users and machines sharing the network do not participate automatically.</p></section>
+
+<section id="recovery"><div class="kicker">VISIBLE, RESUMABLE OUTCOMES</div><h2>Keep progress when a request cannot finish</h2><p>A strict download reports its partial progress with an error. Managed jobs persist progress and their current state for inspection.</p><div class="states"><div><b class="wait">WAITING FOR PROVIDER</b><p>A cooldown or request budget has not cleared. Next eligible time is recorded.</p></div><div><b class="wait">WAITING FOR NETWORK</b><p>A temporary connection or server failure needs a later retry.</p></div><div><b class="pause">PAUSED</b><p>A cooperative stop preserved the completed hours.</p></div><div><b class="action">NEEDS ACTION</b><p>Access, source, corruption or storage needs attention.</p></div><div><b class="done">COMPLETE</b><p>Every requested hour is complete or confirmed empty.</p></div><div><b class="queue">QUEUED</b><p>Saved work has not started. Jobs do not schedule themselves.</p></div></div><p>Resume a waiting job after its saved deadline with <code>tick-vault resume JOB_ID</code>. If a process exits before publishing a shared-hour receipt, a later permitted request may be needed for that hour.</p></section>
+
+<section id="integrity"><div class="kicker">LOCAL DATA SAFETY</div><h2>Validate before trusting the cache</h2><p>Payloads are decompressed within bounds, then checked for record alignment, timestamps, hour limits and valid volumes. Invalid content is not published as a successful tick file. Valid writes use atomic publication.</p><ul class="checks"><li>Downloaded, confirmed empty and failed hours have separate metadata states.</li><li>Missing or changed files are rechecked when the range resumes.</li><li>A valid file left by an interrupted metadata update can be recovered without a new request.</li><li>Failed export preserves the previous output.</li><li>Vault identity is pinned to its configured feed.</li></ul><p>Size and modification time speed up warm resume but are not cryptographic proofs. Shared receipt reuse also checks a digest and payload validity.</p></section>
+
+<section id="scope"><div class="kicker">GUARANTEES WITH A BOUNDARY</div><h2>What can be promised?</h2><div class="promise"><p><b>✓ &nbsp;Fully cached, validated range</b><br>Reading it makes no provider request, so it cannot receive a provider 429.</p><p><b>◷ &nbsp;Two-minute query</b><br>Local filtering is two minutes; a cache miss can still fetch one whole hourly file.</p><p><b>↗ &nbsp;Uncached range</b><br>Requests follow local limits, while provider availability and quotas remain external.</p></div><p>Dukascopy's documented Requester Pays daily S3 route has a different protocol, requires credentials and billing, and is not an automatic fallback here. Another source needs separate authorization, provenance and validation.</p></section>
+
+<section id="validation"><div class="kicker">VALIDATION RECORD · 12 OCT 2026</div><h2>What has actually been tested</h2><p>Offline tests passed on Windows with current and minimum supported dependency sets. They use synthetic BI5 records and mocked HTTP responses, covering pacing, cooldown persistence, cancellation, recovery, provenance, storage and CLI behavior.</p><div class="evidence"><b>429</b><div><strong>One bounded live access check</strong><p>It received HTTP 429 and no successful tick payload. Further requests stopped. This shows that route was restricted during that check; it does not establish a permanent outage or identify which component produced the response.</p></div></div><p>See the <a href="https://github.com/keyhankamyar/TickVault/blob/fix/complete-roadmap/docs/VALIDATION.md">full validation record</a>, <a href="https://github.com/keyhankamyar/TickVault/blob/fix/complete-roadmap/docs/REVIEW.md">reliability review</a> and <a href="https://github.com/keyhankamyar/TickVault/blob/fix/complete-roadmap/docs/DELIVERY_OPTIONS.md">delivery options</a>.</p></section>
+
+<div class="end-note"><i></i><p>Ready to use your local archive?</p><a href="#getting-started">Open the getting started guide →</a></div>
+</article>
+</section>
+</main>
+<footer class="footer wrap"><a class="brand" href="#top"><span class="mark">▥</span>tick<span>vault</span></a><span>Local archives for historical tick research.</span><nav><a href="#getting-started">Guide</a><a href="#reliability">Reliability</a><a href="https://github.com/keyhankamyar/TickVault">Source ↗</a></nav><small>Open source · MIT license</small></footer>
+</body></html>

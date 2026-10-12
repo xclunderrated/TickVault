@@ -1,467 +1,340 @@
-<div align="center">
+# TickVault
 
-# TickVault 🏦
+Download, validate and query Dukascopy historical ticks in Python. Keep original
+compressed hourly files locally, resume interrupted downloads, and decode only
+the hours needed for a query.
 
-**A high-performance Python library for downloading, storing, and accessing financial tick data from Dukascopy Bank's historical datafeed. Built for quantitative researchers and algorithmic traders who need reliable access to high-resolution market data.**
+This checkout implements the original roadmap and client reliability plan for version 0.3.0. It repairs the
+worker hang reported in [issue #3](https://github.com/keyhankamyar/TickVault/issues/3)
+and adds the two index price scales from
+[issue #1](https://github.com/keyhankamyar/TickVault/issues/1).
+See [validation and remaining service limits](docs/VALIDATION.md) for the evidence.
+The [reliability reviews](docs/REVIEW.md) record thirteen additional defects and their fixes;
+the [prevention and recovery plan](docs/RELIABILITY_PLAN.md) tracks implementation and external access gates.
+The [GitHub Pages project page](https://keyhankamyar.github.io/TickVault/) puts the
+overview, getting-started guide and reliability notes on one page.
 
-[![Python 3.14](https://img.shields.io/badge/python-3.14-blue.svg)](https://www.python.org/downloads/) [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT) [![Code Style](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black) [![PyPI version](https://img.shields.io/pypi/v/tick-vault.svg)](https://pypi.org/project/tick-vault/)
+## Install
 
-</div>
+Requires Python 3.11 or newer. From this checkout:
 
----
-
-## ✨ Highlights
-
-### Two clean layers
-- **Downloader**: concurrent, fault-tolerant fetchers that mirror Dukascopy’s on-disk layout **1:1**.
-- **Reader**: decodes compressed hourly blobs on demand and returns tidy pandas DataFrames.
-
-### High-Performance Downloading
-- **Concurrent Downloads**: Multi-worker architecture with configurable parallelism
-- **Resume Capability**: Intelligent resume functionality with metadata tracking
-- **Proxy Support**: Distributed downloading across multiple proxies
-- **Error Resilience**: Comprehensive retry logic with exponential backoff
-- **Progress Tracking**: Real-time progress monitoring with beautiful progress bars
-
-### Smart Storage
-- **Mirrored Structure**: Local filesystem mirrors Dukascopy's directory hierarchy
-- **Compression-Aware**: Stores data in original compressed `.bi5` format
-- **Metadata Tracking**: SQLite database tracks download status and data availability
-- **Space Efficient**: 10-15GB for assets with decades of history (like Gold)
-
-### Powerful Data Access
-- **Fast Decoding**: Efficient LZMA decompression and NumPy-based decoding
-- **Pandas Integration**: Returns clean, structured DataFrames ready for analysis
-- **Gap Detection**: Automatic data continuity verification
-- **Flexible Queries**: Easy time-range based data retrieval
-
-### Production Ready
-- **Comprehensive Logging**: Structured logging with configurable levels
-- **Configuration Management**: Environment-based configuration with validation
-- **Type Safety**: Full type annotations with Pydantic models
-- **Error Handling**: Graceful handling of network issues and data gaps
-
-### Modern Python
-  * Tested on **Python 3.14**. Works with **3.11–3.14**.
-  * Async I/O (`httpx`), Pydantic v2 settings, tqdm, NumPy, pandas.
-
-## Supported Assets
-All dukascopy assets are supported for downloading. Since price scales differ between assets(each have their own pipet scale), you will need the scaling factor to correctly scale the price values. I have added some of the popular asset's price scales to the registry for convenience, and will add more as we go:
-
-- **Forex Majors**: EURUSD, GBPUSD, USDJPY, AUDUSD, USDCAD, USDCHF, NZDUSD
-- **Precious Metals**: XAUUSD (Gold), XAGUSD (Silver)
-- **Cryptocurrencies**: BTCUSD, ETHUSD
-
-> For other assets you should identify the price scale manually for reading. Think of price scale as the lowest resolution of price for that asset. For example, the pipet size/price resolution for **"XAUUSD"** is **"0.001"**.
-
----
-## 🚀 Quick Start
-
-### Installation
-```bash
-pip install tick-vault
-```
-Or install from source:
-
-1) Clone the repo:
-```bash
-git clone https://github.com/keyhankamyar/TickVault.git
-cd TickVault
-```
-2) Create a custom environment:
-```bash
-python -m venv .venv
-source .venv/bin/activate
-
-# Or use conda
-conda create --prefix .conda python -y
-conda activate ./.conda
-```
-3) Install the package:
-```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Or install in development mode
-pip install -e .
+```powershell
+py -3.13 -m venv .venv
+.\.venv\Scripts\python -m pip install -e ".[dev,hdf5]"
+.\.venv\Scripts\tick-vault --help
 ```
 
-### Basic Usage
+On Linux/macOS, activate your virtual environment and use
+`python -m pip install -e ".[dev,hdf5]"`. HDF5 is optional:
+`python -m pip install -e .` installs the downloader, pandas reader and SQLite
+storage without PyTables. Version 0.3.0 has not been published to PyPI.
 
-### 1) Download Historical Data (resumable)
+## Download and read
 
 ```python
+import asyncio
 from datetime import datetime
-from tick_vault import download_range, reload_config
+from tick_vault import download_and_read, reload_config
 
-# Optional: configure base directory, worker counts, etc.
-reload_config(
-    base_directory="./tick_vault_data",
-    worker_per_proxy=10,                 # default 10
-    fetch_max_retry_attempts=3,          # default 3
-    fetch_base_retry_delay=1.0,          # default 1.0s
-)
+reload_config(base_directory="./tick_vault_data", worker_per_proxy=4)
 
-# Download one month of gold (XAU/USD) tick data
-await download_range(
-    symbol='XAUUSD',
-    start=datetime(2024, 1, 1),
-    end=datetime(2024, 2, 1)
-)
-
-# Download with multiple proxies for faster speeds
-await download_range(
-    symbol='EURUSD',
-    start=datetime(2024, 1, 1),
-    end=datetime.now(),
-    proxies=[
-        'http://proxy1.example.com:8080',
-        'http://proxy2.example.com:8080'
-    ]
-)
-```
-
-Re-running the same call later will **resume** and only attempt hours not yet recorded in the metadata database.
-
-### 2) Read and Analyze Data (on-demand decode → DataFrame)
-
-```python
-from tick_vault import read_tick_data
-
-# Read all available data for a symbol
-df = read_tick_data(symbol='XAUUSD')
-
-# Read specific date range
-df = read_tick_data(
-    symbol='EURUSD',
-    start=datetime(2024, 1, 1),
-    end=datetime(2024, 2, 1)
-)
-
-# Validation and progressbar
-df = read_tick_data(
-    symbol="XAUUSD",
-    strict=True,         # verify requested range is fully present (raises on gaps)
-    show_progress=True,  # tqdm while decoding hourly chunks
-)
-
-print(df.head())
-print(f"Total ticks: {len(df)}")
-print(f"Time range: {df['time'].min()} to {df['time'].max()}")
-# columns: time, ask, bid, ask_volume, bid_volume
-```
-
-### 3) Configuration
-
-```python
-from tick_vault import reload_config
-
-# Customize settings programmatically
-reload_config(
-    base_directory='./my_tick_data',
-    worker_per_proxy=15,
-    fetch_max_retry_attempts=5
-)
-```
-Or use environment variables
-```python
-import os
-
-os.environ['TICK_VAULT_BASE_DIRECTORY'] = './my_tick_data'
-os.environ['TICK_VAULT_WORKER_PER_PROXY'] = 15
-```
-
----
-## 🏗️ Architecture
-
-### Download Pipeline
-
-```mermaid
-flowchart TB
-    subgraph Orchestrator["Orchestrator (download_range)"]
-        A[Generate Hourly Chunks] --> B[Distribute Across Proxies]
-        B --> C[Manage Progress & Queues]
-    end
-
-    subgraph Workers["Download Workers (Parallel)"]
-        D1[Worker 1<br/>Proxy A] 
-        D2[Worker 2<br/>Proxy A]
-        D3[Worker N<br/>Proxy B]
-    end
-
-    subgraph Fetching["HTTP Layer"]
-        E[Fetch with Retry<br/>Exponential Backoff]
-        E --> F{Response}
-        F -->|200 OK| G[Decompress .bi5]
-        F -->|404| H[No Data]
-        F -->|429/503| I[Rate Limited]
-        F -->|401/403| J[Forbidden]
-        I -->|Retry After| E
-        J -->|Fatal Error| K[Abort]
-    end
-
-    subgraph Storage["Storage"]
-        L[(SQLite DB<br/>metadata.db)]
-        M[Local Filesystem<br/>downloads/SYMBOL/YYYY/MM/DD/HHh_ticks.bi5]
-    end
-
-    subgraph Metadata["Metadata Worker"]
-        N[Batch Accumulator]
-        O[Batch Insert/Update]
-    end
-
-    C -->|Chunks| D1 & D2 & D3
-    D1 & D2 & D3 -->|URL| E
-    G -->|Binary Data| M
-    H -->|Mark No Data| N
-    G -->|Success| N
-    N -->|100 chunks or timeout| O
-    O -->|Update Status| L
-
-    style A fill:#4CAF50,color:#fff
-    style E fill:#2196F3,color:#fff
-    style L fill:#FF9800,color:#fff
-    style M fill:#9C27B0,color:#fff
-    style N fill:#00BCD4,color:#fff
-    style K fill:#f44336,color:#fff
-```
-
-**Design Principles**:
-- Multiple download workers for parallelism
-- Single metadata worker to avoid database contention
-- Queue-based communication for clean separation
-- Batch database writes for efficiency
-
-### Storage layout (mirrors source 1:1)
-
-TickVault mirrors Dukascopy's URL structure on your local filesystem:
-
-```
-tick_vault_data/
-├── downloads/
-│   └── XAUUSD/
-│       └── 2024/
-│           └── 02/          # Month, 0-indexed(00=Jan ... 11=Dec)
-│               └── 15/      # Day
-│                   ├── 00h_ticks.bi5
-│                   ├── 01h_ticks.bi5
-│                   └── ...
-├── metadata.db              # SQLite database tracking download status
-└── logs.log                 # Detailed operation logs
-```
-
-### Data Flow
-1. **Orchestrator** generates hourly chunks and manages worker distribution
-2. **Download Workers** fetch compressed `.bi5` files concurrently
-3. **Metadata Worker** batches updates to track download status
-4. **Reader** decompresses and decodes data into structured arrays
-5. **Pandas** provides the final DataFrame interface
-
-### Project Structure
-
-```
-TickVault/
-├── .gitignore
-├── pyproject.toml
-├── requirements.txt
-├── README.md
-├── CHANGELOG.md
-├── LICENSE
-├── MANIFEST.in
-└── tick_vault/
-    ├── __init__.py           # Public API: download_range, read_tick_data, reload_config
-    ├── py.typed              # Type hints marker for mypy
-    ├── constants.py          # Base URL, pipette scales
-    ├── config.py             # Pydantic settings + computed paths
-    ├── logger.py             # Centralized logging (console + file)
-    ├── utils.py              # Date/hour generators, path formatting (0-index month)
-    ├── chunk.py              # TickChunk model (url/path/save/load)
-    ├── fetcher.py            # HTTP fetch with strong error taxonomy + retry
-    ├── download_worker.py    # Async worker: get → save → emit
-    ├── metadata.py           # SQLite DB: tracking, gap checks, available hours
-    ├── metadata_worker.py    # Single writer, batched inserts
-    ├── decoder.py            # LZMA decode → structured NumPy
-    ├── downloader.py         # Download orchestrator
-    └── reader.py             # Orchestrates decoding → pandas DataFrame
-```
-
----
-## 📖 Detailed Usage
-
-### Supported Assets
-
-TickVault includes pre-configured pipet scales for common assets:
-
-**Forex Majors**: EURUSD, AUDUSD, GBPUSD, NZDUSD, USDCAD, USDCHF, USDJPY  
-**Metals**: XAUUSD (Gold), XAGUSD (Silver)  
-**Crypto**: BTCUSD, ETHUSD
-
-For other assets, provide the `pipet_scale` parameter:
-
-```python
-df = read_tick_data(
-    symbol='CUSTOM_PAIR',
-    start=datetime(2024, 1, 1),
-    end=datetime(2024, 2, 1),
-    pipet_scale=0.01  # Custom scaling factor
-)
-```
-
-### Resumable Downloads
-
-TickVault automatically tracks download progress in a SQLite database. If a download is interrupted:
-
-```python
-# Simply run the same command again
-await download_range(
-    symbol='XAUUSD',
-    start=datetime(2020, 1, 1),  # Large historical range
-    end=datetime(2024, 1, 1)
-)
-
-# TickVault will skip already-downloaded chunks and resume where it left off
-```
-
-### Incremental Updates
-
-Update your dataset with recent data:
-
-```python
-from datetime import datetime, UTC
-
-# Download only the last week
-await download_range(
-    symbol='EURUSD',
-    start=datetime(2024, 3, 25),
-    end=datetime.now(tz=UTC)
-)
-```
-
-### Gap Detection and Data Integrity
-
-```python
-# Strict mode (default): raises error if data is incomplete
-df = read_tick_data(
-    symbol='XAUUSD',
-    start=datetime(2024, 1, 1),
-    end=datetime(2024, 2, 1),
-    strict=True  # Ensures no gaps in data
-)
-
-# Non-strict mode: clips to available data range
-df = read_tick_data(
-    symbol='XAUUSD',
-    start=datetime(2020, 1, 1),  # May be before first available
-    end=datetime(2030, 1, 1),    # May be after last available
-    strict=False  # Automatically adjusts to available range
-)
-```
-
-### Working with the Metadata Database
-
-```python
-from tick_vault.metadata import MetadataDB
-
-with MetadataDB() as db:
-    # Find what's available
-    first = db.first_chunk('XAUUSD')
-    last = db.last_chunk('XAUUSD')
-    print(f"Data range: {first.time} to {last.time}")
-    
-    # Find chunks that haven't been downloaded yet
-    pending = db.find_not_attempted_chunks(
-        symbol='EURUSD',
-        start=datetime(2024, 1, 1),
-        end=datetime(2024, 2, 1)
+async def main():
+    ticks = await download_and_read(
+        "EURUSD",
+        datetime(2024, 1, 15, 12, 30),
+        datetime(2024, 1, 15, 12, 40),
+        show_progress=False,
     )
-    print(f"Pending downloads: {len(pending)}")
-    
-    # Verify data continuity
-    try:
-        db.check_for_gaps(
-            symbol='XAUUSD',
-            start=datetime(2024, 1, 1),
-            end=datetime(2024, 2, 1)
-        )
-        print("✓ No gaps found")
-    except RuntimeError as e:
-        print(f"✗ Gaps detected: {e}")
+    print(ticks.head())
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
----
+Naive datetimes mean UTC. Aware datetimes are converted to UTC before rounding.
+The downloader fetches complete hourly files overlapping a historical request.
+The reader returns ticks in exactly `[start, end)`; a ten-minute request inside
+one historical hour downloads that hour and returns only those ten minutes.
+A two-minute uncached query still transfers an entire compressed hourly file;
+query duration is not a download-size limit. For a limited internet allowance,
+reuse cached data and set explicit query bounds before starting a live download.
+An omitted `end` is evaluated at each call. Downloads cap the end at the current
+UTC hour boundary, excluding incomplete and future hours.
 
-## ⚙️ Configuration Reference
+Existing calls to `download_range`, `read_tick_data` and `reload_config` still work.
+`download_range` now returns a `DownloadReport` with separate downloaded, no-data,
+cached and failed counts. The report distinguishes successful discovery from a
+cooperative stop. Corrupt responses are rejected before an atomic cache write.
 
-| Setting                         | Type             | Default             | Notes                                                        |
-| ------------------------------- | ---------------- | ------------------- | ------------------------------------------------------------ |
-| `base_directory`                | `Path`           | `./tick_vault_data` | Root containing `downloads/`, `metadata.db`, and `logs.log`. |
-| `fetch_max_retry_attempts`      | `int [0..10]`    | `3`                 | Retries beyond initial attempt.                              |
-| `fetch_base_retry_delay`        | `float (0..60]`  | `1.0`               | Exponential backoff base (seconds).                          |
-| `worker_per_proxy`              | `int [1..100]`   | `10`                | Concurrency per proxy entry (or 1 if no proxies provided).   |
-| `worker_queue_timeout`          | `float > 0`      | `60.0`              | Fails workers if the pipeline stalls.                        |
-| `metadata_update_batch_timeout` | `float > 0`      | `1.0`               | Flush partial batches frequently.                            |
-| `metadata_update_batch_size`    | `int [1..10000]` | `100`               | Larger = more throughput, more unflushed work on crash.      |
-| `base_log_level`                | enum             | `DEBUG`             | File handler gets everything at DEBUG.                       |
-| `console_log_level`             | enum             | `INFO`              | Must be ≥ base severity.                                     |
+```python
+from tick_vault import download_range, read_tick_data
 
-
-**Configuration via Environment Variables**:
-
-```bash
-export TICK_VAULT_BASE_DIRECTORY=/data/ticks
-export TICK_VAULT_WORKER_PER_PROXY=15
-export TICK_VAULT_FETCH_MAX_RETRY_ATTEMPTS=5
+# In an async function:
+report = await download_range("EURUSD", start, end)
+# Later, without a network request:
+ticks = read_tick_data("EURUSD", start, end, show_progress=False)
 ```
 
-**Configuration via .env file**:
+The five columns are `time`, `ask`, `bid`, `ask_volume` and `bid_volume`.
+Times retain the original pandas UTC-naive representation. Prices use the
+instrument's pipet scale; volumes retain the original integer millionths
+representation (the BI5 float volume multiplied by 1,000,000 and rounded).
+Duplicate timestamps are retained because distinct ticks can share a millisecond.
 
-```env
-# .env
-TICK_VAULT_BASE_DIRECTORY=/data/ticks
-TICK_VAULT_WORKER_PER_PROXY=15
-TICK_VAULT_FETCH_MAX_RETRY_ATTEMPTS=5
-TICK_VAULT_BASE_LOG_LEVEL=INFO
+## Shared budgets and resumable jobs
+
+By default, all TickVault calls and CLI processes for this user share a durable
+provider budget: one request at a time, starts at least two seconds apart,
+30 starts per minute and 1,800 per hour. These are client ceilings, not a
+published Dukascopy allowance. Cached ranges need no HTTP requests.
+
+Bulk downloads require a successful nonempty validated payload from the selected
+hourly feed. Start with one explicit canary, which makes at most one GET and
+does not retry:
+
+```sh
+python -m tick_vault canary EURUSD 2024-01-02T12:00:00Z --base-directory ./ticks --json
+python -m tick_vault provider-status
+python -m tick_vault download EURUSD 2024-01-02 --end 2024-01-03 --base-directory ./ticks --managed --json
+python -m tick_vault job-status JOB_ID
+python -m tick_vault resume JOB_ID
 ```
 
----
-## 🗺️ Roadmap
+A managed download returns its durable job ID, state, completed/pending counts
+and next eligible time. Normal throttling or a temporary outage leaves it waiting;
+run `resume` after the deadline. Jobs do not schedule themselves. Permission,
+source identity and corruption problems stay visible as `needs_action`.
+New jobs store absolute vault and provider-state paths, so resuming from another
+working directory continues using the original archive.
 
-**Downloading**:
-- [ ] Async stop events for graceful worker termination
-- [ ] Dynamic worker auto-balancing with throughput monitoring
-- [ ] Adaptive worker scaling based on performance metrics
+```python
+from tick_vault import submit_download_job, resume_download_job
 
-**Reading**:
-- [ ] Multi-threading and multi-processing support for decoding
-- [ ] Streaming pipeline to SQLite for memory-efficient processing
-- [ ] HDF5 storage backend option for large datasets
+job = await submit_download_job("EURUSD", start, end)
+print(job.job_id, job.state, job.completed, job.pending, job.next_eligible_at)
+# Later, after the stored deadline:
+job = await resume_download_job(job.job_id)
+```
 
-**General**:
-- [ ] Unified download-and-read convenience function
-- [ ] Reorganized module structure (separate core, download, read packages)
-- [ ] Comprehensive pytest test suite
-- [ ] CLI interface for command-line operations
-- [ ] Enhanced documentation with usage examples
-- [ ] Jupyter notebook tutorials
+`download_range` retains its strict exception contract and attaches partial
+progress as `error.failure_report`. Use the managed API when waiting states are
+more useful than exceptions. Source-specific shared receipts let overlapping
+jobs and separate vaults reuse the same validated hour. An interrupted owner may
+need a later permitted fetch if it never published a complete receipt.
 
----
-## 📄 License
+429 and 503 with Retry-After are persisted as soon as response headers arrive.
+Without a usable header, the default cooldown is fifteen minutes. Recovery adds
+nonnegative jitter and admits one probe; another throttle extends the pause and
+reduces the request rate. Restarts, other symbols, vaults and proxy routes use the
+same stored restriction. State defaults to `%LOCALAPPDATA%/TickVault/provider`
+on Windows or `~/.local/state/tick-vault/provider` elsewhere. Use the same local
+state directory for all cooperating processes. Other applications and machines
+sharing your network do not automatically participate.
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+## Large ranges and storage
 
----
-## 🙏 Acknowledgments
+`read_tick_data` materializes a DataFrame. Use `iter_tick_data` for bounded memory:
 
-- Data provided by [Dukascopy Bank](https://www.dukascopy.com/)
-- Built with [httpx](https://www.python-httpx.org/), [pandas](https://pandas.pydata.org/), [numpy](https://numpy.org/), and [pydantic](https://docs.pydantic.dev/)
+```python
+from tick_vault import iter_tick_data
 
----
-## 📬 Contributing
+for batch in iter_tick_data(
+    "EURUSD", start, end,
+    backend="thread", max_workers=4, max_pending=8,
+    batch_size=100_000, show_progress=False,
+):
+    # Each frame has at most batch_size rows.
+    print(len(batch))
+```
 
-Contributions are warmly welcome ❤️
-Please open an issue or PR with clear rationale, tests (where applicable), and thoughtful naming. The codebase favors small, composable modules and explicit error handling.
+Decode backends are `serial` (default), `thread` and `process`. Submitted parallel
+work is bounded and results stay in chronological order. Memory depends on the
+size of the pending hourly files, rather than the full history. Process decoding
+on Windows must run behind `if __name__ == "__main__":`; use threads in notebooks.
 
----
+Streaming SQLite and optional HDF5 backends support export and time-range queries:
 
-> **TickVault**: Because your backtests deserve clean, complete, and trustworthy data.  
-> Crafted with precision for quants, traders, and data engineers who refuse to compromise.
+```python
+from tick_vault import export_sqlite, iter_sqlite, export_hdf5, iter_hdf5
+
+count = export_sqlite("eurusd.sqlite", "EURUSD", start=start, end=end)
+for batch in iter_sqlite("eurusd.sqlite", "EURUSD", start=start, end=end):
+    print(batch.head())
+
+# Requires the hdf5 extra:
+count = export_hdf5("eurusd.h5", "EURUSD", start=start, end=end)
+for batch in iter_hdf5("eurusd.h5", "EURUSD", start=start, end=end):
+    print(batch.head())
+```
+
+Exports preserve repeated ticks and exact timestamp bounds. SQLite range queries
+use a symbol/time index. Both exports replace their destination atomically only
+after successful completion; a failed export leaves the previous file intact.
+CSV, SQLite and HDF5 exports reject destinations belonging to vault metadata,
+logs, provider state (including SQLite sidecars), or either raw cache.
+HDF5 append requires chronological ranges; SQLite accepts earlier appended ranges
+and orders query results by time. Append preserves duplicates and does not deduplicate.
+
+## CLI
+
+```powershell
+tick-vault download EURUSD 2024-01-15T12:30 --end 2024-01-15T12:40 --json
+tick-vault read EURUSD --start 2024-01-15T12:30 --end 2024-01-15T12:40 --output ticks.csv
+tick-vault export EURUSD eurusd.sqlite --format sqlite
+tick-vault export EURUSD eurusd.h5 --format hdf5
+tick-vault status EURUSD
+```
+
+Use `--base-directory PATH` to select a vault. JSON and CSV go to standard output;
+logs and progress go to standard error. Ctrl-C stops downloads cooperatively,
+preserves completed results, and exits with code 130. See [CLI reference](docs/CLI.md).
+
+## Reliability and resume
+
+- Bounded queues and shared HTTP connections keep large ranges manageable.
+- Workers pull from one shared queue, so faster workers take more available work.
+- Adaptive concurrency observes request latency and throughput, grows cautiously,
+  and reduces concurrency after transient errors or throttling.
+- A persistent provider cooldown applies to all cooperating calls, processes,
+  vaults, workers and configured proxies after a 429.
+  `Retry-After` accepts seconds or HTTP dates, including zero. Delays exceeding the
+  configured retry budget produce an explicit error.
+- Typed HTTP/network failures propagate promptly, with a bounded retry count and
+  timeout. No response-wait loop can hide a terminated worker.
+- SQLite metadata records downloaded, confirmed no-data and failed outcomes
+  separately. Failed and interrupted hours remain eligible for retry.
+- Resume reuses the size and modification time of previously validated files.
+  Changed files are revalidated; missing or corrupt files are scheduled again.
+  A complete validated file left by an interrupted metadata write is
+  recovered without downloading it again.
+- Legacy metadata migrates additively. Old rows without a file are treated as
+  unresolved, because the old schema cannot prove they were legitimate no-data.
+- Confirmed no-data expires after `no_data_retry_after` seconds (default one day),
+  or can be explicitly rechecked with `retry_no_data=True`.
+- Strict reading verifies each requested hour has a successful or confirmed
+  no-data outcome. Both reading modes report missing/corrupt files claimed as
+  downloaded. `strict=False` clips to coverage and skips unresolved hours.
+
+Graceful stop and progress callbacks:
+
+```python
+import asyncio
+
+stop = asyncio.Event()
+
+def progress(snapshot):
+    print(snapshot.completed, snapshot.total, snapshot.active_workers)
+
+# In an async function; another task may call stop.set():
+report = await download_range(
+    "EURUSD", start, end, stop_event=stop, progress_callback=progress
+)
+```
+
+## Configuration
+
+`reload_config` reloads defaults, `.env` and environment settings with explicit
+keywords taking precedence. The shared configuration keeps its identity, so
+existing imports immediately see new values. Unknown explicit settings fail.
+Downloads, managed jobs and `download_and_read` capture their configuration.
+Reloads affect new work without redirecting an active download or its reader.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `base_directory` | `./tick_vault_data` | Cache, metadata and logs |
+| `datafeed_base_url` | `https://datafeed.dukascopy.com/datafeed/` | Explicit HTTPS hourly feed base |
+| `worker_per_proxy` | `4` | Maximum workers per configured connection route |
+| `adaptive_workers` | `True` | Adapt active concurrency |
+| `adaptive_min_workers` | `1` | Minimum active worker count |
+| `adaptive_adjustment_interval` | `8` | Observations per adjustment |
+| `queue_size` | `128` | Pipeline queue capacity |
+| `fetch_timeout` | `30.0` | HTTP request timeout, seconds |
+| `fetch_max_response_bytes` | `67108864` | Maximum compressed success body, bytes |
+| `fetch_max_retry_attempts` | `3` | Retries beyond the initial request |
+| `fetch_base_retry_delay` | `1.0` | Exponential delay base, seconds |
+| `fetch_max_retry_delay` | `60.0` | Maximum retry wait budget, seconds |
+| `no_data_retry_after` | `86400.0` | Confirmed no-data recheck age, seconds |
+| `provider_state_directory` | Per-user local state | Shared budget, leases, raw receipts and managed jobs |
+| `provider_require_verified_access` | `True` | Require source access proof before uncached multi-hour work |
+| `provider_key` | `dukascopy` | Stable provider/account group shared by every route |
+| `provider_request_interval` | `2.0` | Minimum start spacing, seconds |
+| `provider_max_concurrency` | `1` | Aggregate HTTP attempts in flight |
+| `provider_minute_budget` / `provider_hour_budget` | `30` / `1800` | Rolling request-start ceilings |
+| `provider_no_header_cooldown` | `900.0` | Pause after throttling with no usable Retry-After |
+| `provider_cooldown_jitter` | `1.0` | Maximum extra nonnegative cooldown, seconds |
+| `provider_admission_wait_budget` | `60.0` | Maximum in-call wait for admission, seconds |
+| `provider_request_lease_seconds` / `provider_hour_lease_seconds` | `90.0` / `180.0` | Heartbeat-protected ownership lifetimes |
+| `metadata_update_batch_size` | `100` | Metadata records per transaction |
+| `metadata_update_batch_timeout` | `1.0` | Flush interval, seconds |
+| `worker_queue_timeout` | `60.0` | Compatibility worker queue setting |
+| `base_log_level` / `console_log_level` | `DEBUG` / `INFO` | File/console log levels |
+
+All fields accept `TICK_VAULT_` environment names, such as
+`TICK_VAULT_BASE_DIRECTORY=D:\\MarketData`.
+`reload_config(env_file="custom.env")` selects a dotenv file; `env_file=None`
+disables it. Library import creates no cache or log directories.
+
+Configured instruments include forex majors, XAUUSD, XAGUSD, BTCUSD, ETHUSD,
+USATECHIDXUSD and USA500IDXUSD. Other Dukascopy instruments can be downloaded;
+pass a verified `pipet_scale` to read them. Symbols are normalized to uppercase
+and validated before use in paths and SQL identifiers.
+
+## Provider access
+
+The legacy hourly feed remains the default. An endpoint migration asserted by
+an issue reporter is not a verified replacement protocol. The library supports
+an explicitly configured HTTPS hourly feed base, but does not switch hosts on
+throttling or fabricate data.
+
+A vault is pinned to its hourly feed identity. Changing `datafeed_base_url`
+requires a separate `base_directory`; old bytes cannot silently satisfy a new
+source. Unattributed legacy archives can inherit the standard legacy feed only.
+Persisted provider ceilings can tighten; another caller cannot relax them by
+raising its worker count or setting a faster policy.
+
+[Dukascopy's current export documentation](https://www.dukascopy.com/wiki/en/development/data-export/)
+also describes an AWS Requester Pays daily export. That requires AWS credentials,
+billing authorization and a different timebase. It is not an interchangeable
+hourly URL and this version does not implement or activate paid S3 downloads.
+
+A bounded live probe with the new controls returned HTTP 429 and stored a shared
+cooldown. No successful real payload was received. The deterministic
+regression tests verify library behavior; a successful live payload download
+remains a separate service-access validation. See [validation](docs/VALIDATION.md).
+
+## Roadmap delivered
+
+| Original item | Implementation |
+| --- | --- |
+| Async stop events | `stop_event`, cancellation cleanup and metadata flush |
+| Dynamic worker balancing | Shared bounded queue and throughput snapshots |
+| Adaptive worker scaling | Latency/error-aware concurrency controller |
+| Multi-thread/process decoding | Ordered bounded `thread` and `process` backends |
+| Streaming pipeline to SQLite | `export_sqlite`, indexed `iter_sqlite` |
+| HDF5 backend | Optional `export_hdf5`, `iter_hdf5` |
+| Unified download/read | `download_and_read` |
+| Core/download/read packages | Implementations with compatibility import shims |
+| Comprehensive pytest suite | Network, shutdown, migration, decode, storage and CLI regressions |
+| CLI | `tick-vault` and `python -m tick_vault` |
+| Enhanced documentation | This guide, CLI reference, validation record and runnable examples |
+| Notebook tutorials | [Offline tutorial](notebooks/tickvault_tutorial.ipynb) |
+
+## Development
+
+```powershell
+.\.venv\Scripts\python -m pytest
+.\.venv\Scripts\python -m ruff check tick_vault tests examples
+.\.venv\Scripts\python -m black --check tick_vault tests examples
+.\.venv\Scripts\python -m build
+```
+
+The default tests make no provider requests. CI covers Windows and Linux on
+Python 3.11–3.14, including optional HDF5. Run the
+[offline example](examples/offline_analysis.py) or the notebook without credentials.
+[download_one_hour.py](examples/download_one_hour.py) performs a bounded live
+request only when explicitly invoked.
+
+Local files retain Dukascopy's zero-based month layout:
+`downloads/SYMBOL/YYYY/MM/DD/HHh_ticks.bi5`, where January is `00`.
+
+MIT licensed. Original author: Keyhan Kamyar.

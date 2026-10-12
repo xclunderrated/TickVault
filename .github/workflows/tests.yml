@@ -1,0 +1,39 @@
+name: Tests
+on: [push, pull_request]
+jobs:
+  tests:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.11', '3.12', '3.13', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install -e ".[dev,hdf5]"
+      - run: python -m ruff check tick_vault tests examples
+      - run: python -m black --check tick_vault tests examples
+      - run: python -m mypy tick_vault
+      - run: python -m pytest
+      - run: python -m build
+  minimum-dependencies:
+    name: Python 3.11 minimum dependencies (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install pinned minimum dependency set
+        run: python -m pip install -c .github/constraints-min.txt setuptools wheel
+      - run: python -m pip install --no-build-isolation -c .github/constraints-min.txt -e ".[dev,hdf5]"
+      - run: python -m pip check
+      - name: Run complete offline test suite at supported floors
+        run: python -m pytest

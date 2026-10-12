@@ -1,9 +1,10 @@
 # TickVault Requirements
-# Python 3.10+
+# Python 3.11+
 
 # Core Dependencies
-pydantic>=2.0.0             # Data validation and settings management
-pydantic-settings>=2.0.0    # Environment variable management
+pydantic>=2.0.1             # Data validation and settings management
+pydantic-settings>=2.0.2    # Environment variable management
 httpx>=0.27.0               # Async HTTP client with connection pooling
 pandas>=2.0.0               # Data analysis and DataFrame support
+numpy>=1.24.0               # Binary tick decoding
 tqdm>=4.66.0                # Progress bars for downloads and reading

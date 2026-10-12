@@ -5,3 +5,10 @@ include requirements.txt
 include pyproject.toml
 recursive-include tick_vault *.py
 recursive-include tick_vault py.typed
+recursive-include docs *.md *.html *.css *.svg *.txt
+recursive-include examples *.py
+recursive-include notebooks *.ipynb
+recursive-include tests *.py
+include .github/workflows/tests.yml
+include .github/workflows/pages.yml
+include .github/constraints-min.txt

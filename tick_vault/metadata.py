@@ -1,438 +1,533 @@
-"""Metadata database module for managing tick data download status."""
+"""Durable download status and bounded, ordered metadata queries."""
 
+import hashlib
 import sqlite3
-from datetime import UTC, datetime
+from collections.abc import Iterable, Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import TracebackType
+from typing import Any, Literal, cast
 
 from .chunk import TickChunk
-from .config import CONFIG
-from .logger import logger
-from .utils import generate_hourly_datetimes
+from .config import get_config
+from .core.binary import validate_payload
+from .utils import hour_ceil, hour_floor, normalize_datetime, normalize_symbol
+
+DownloadStatus = Literal["downloaded", "no_data", "failed"]
+_COMPLETE = ("downloaded", "no_data")
+LEGACY_SOURCE_KEY = hashlib.sha256(
+    b"https://datafeed.dukascopy.com/datafeed/"
+).hexdigest()
+
+
+class SourceIdentityError(ValueError):
+    """A local vault cannot silently combine different configured feeds."""
 
 
 class MetadataDB:
-    """
-    SQLite-based metadata storage for tracking tick data download status.
+    """SQLite metadata; open one connection per owning thread.
 
-    Each symbol gets its own table with hourly entries as rows. The timestamp
-    serves as the primary key, allowing efficient queries and automatic sorting.
-    This design supports non-sequential inserts and gap detection.
-
-    The database is designed for single-threaded access only. For concurrent
-    downloads, use a queue-based architecture with a dedicated metadata worker.
-
-    Attributes:
-        db_path: Path to the SQLite database file
+    Legacy per-symbol tables and ``has_data`` values are retained. The additive
+    migration distinguishes successful downloads, confirmed empty hours and
+    failures. A legacy absent file cannot prove no data, so it remains retryable.
     """
 
     def __init__(self, db_path: str | Path | None = None) -> None:
-        """
-        Initialize the metadata database.
-
-        Args:
-            db_path: Path to the SQLite database file. If None, uses
-                CONFIG.metadata_db_path. Parent directories are created
-                if they don't exist.
-
-        Raises:
-            ValueError: If db_path points to an existing directory instead of a file
-        """
-        self.db_path = Path(db_path) if db_path else CONFIG.metadata_db_path
+        self.db_path = (
+            Path(db_path) if db_path is not None else get_config().metadata_db_path
+        )
         if self.db_path.is_dir():
-            raise ValueError(
-                f"Expected a database path but got a directory: {self.db_path}"
-            )
-
+            raise ValueError(f"Expected a database file, got directory: {self.db_path}")
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(self.db_path, timeout=30)
+        try:
+            # A reader can retain a bounded streaming cursor while background
+            # download results commit on another connection without blocking.
+            self.conn.execute("PRAGMA journal_mode = WAL")
+            self.conn.execute("PRAGMA foreign_keys = ON")
+        except Exception:
+            self.conn.close()
+            raise
+        self._ensured: set[str] = set()
 
-        self.conn = sqlite3.connect(self.db_path)
-        self.conn.execute("PRAGMA foreign_keys = ON")
-        logger.debug(f"Initialized metadata database at {self.db_path}")
+    def bind_source(
+        self, source_key: str, *, raw_directory: str | Path | None = None
+    ) -> None:
+        """Atomically pin a vault to one source before any cache discovery or GET.
+
+        Existing unbound archives can only inherit the standard legacy feed.
+        A custom feed needs an empty vault, since existing bytes and negative
+        cache rows have no provenance that can establish their custom source.
+        """
+        if len(source_key) != 64 or any(
+            character not in "0123456789abcdef" for character in source_key
+        ):
+            raise ValueError("source_key must be a SHA256 feed identity")
+        if self.conn.in_transaction:
+            raise ValueError("Bind the vault source before writing metadata")
+        raw = (
+            Path(raw_directory)
+            if raw_directory is not None
+            else get_config().save_directory
+        )
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            self.conn.execute(
+                "CREATE TABLE IF NOT EXISTS vault_source ("
+                "singleton INTEGER PRIMARY KEY CHECK(singleton=1), "
+                "source_key TEXT NOT NULL, bound_at INTEGER NOT NULL)"
+            )
+            existing = self.conn.execute(
+                "SELECT source_key FROM vault_source WHERE singleton=1"
+            ).fetchone()
+            if existing is not None:
+                if existing[0] != source_key:
+                    raise SourceIdentityError(
+                        "This vault belongs to a different datafeed source; "
+                        "use a separate base_directory for this feed"
+                    )
+            else:
+                has_rows = False
+                tables = self.conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+                for (name,) in tables:
+                    if name.lower().startswith("symbol_"):
+                        quoted = '"' + name.replace('"', '""') + '"'
+                        if (
+                            self.conn.execute(
+                                f"SELECT 1 FROM {quoted} LIMIT 1"
+                            ).fetchone()
+                            is not None
+                        ):
+                            has_rows = True
+                            break
+                has_raw = raw.is_file() or any(
+                    path.is_file() for path in raw.rglob("*.bi5")
+                )
+                if source_key != LEGACY_SOURCE_KEY and (has_rows or has_raw):
+                    raise SourceIdentityError(
+                        "An existing unbound vault can only inherit the standard "
+                        "legacy datafeed; use a separate base_directory for this feed"
+                    )
+                self.conn.execute(
+                    "INSERT INTO vault_source VALUES(1,?,?)",
+                    (source_key, int(datetime.now(UTC).timestamp())),
+                )
+            self.conn.commit()
+        except BaseException:
+            self.conn.rollback()
+            raise
 
     def _get_table_name(self, symbol: str) -> str:
-        """
-        Generate a valid SQL table name from a symbol.
+        return "symbol_" + normalize_symbol(symbol)
 
-        Args:
-            symbol: The trading pair symbol
+    def _table(self, symbol: str) -> str:
+        return '"' + self._get_table_name(symbol).replace('"', '""') + '"'
 
-        Returns:
-            str: A valid SQL table name (prefixed with 'symbol_')
-        """
-        # Prefix with 'symbol_' to ensure valid table name
-        # Replace any non-alphanumeric characters with underscores
-        clean_symbol = "".join(c if c.isalnum() else "_" for c in symbol)
-        return f"symbol_{clean_symbol}"
-
-    # ====================== Internal API ============================
     def _ensure_table_exists(self, symbol: str) -> None:
-        """
-        Create a table for the symbol if it doesn't exist.
-
-        Args:
-            symbol: The trading pair symbol
-        """
-        logger.debug(f"Ensuring table exists for symbol: {symbol}")
-        table_name = self._get_table_name(symbol)
-        self.conn.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {table_name} (
-                timestamp INTEGER PRIMARY KEY,
-                has_data INTEGER NOT NULL CHECK(has_data IN (0, 1))
-            )
-            """
-        )
-        self.conn.commit()
-
-    # ====================== Download API ============================
-    def insert_rows(self, chunks: list[TickChunk]) -> None:
-        """
-        Insert or update multiple metadata rows in a single transaction.
-
-        Chunks are grouped by symbol, and each symbol's data is inserted in one
-        transaction. If an entry already exists for a timestamp, it will be replaced.
-
-        Args:
-            chunks: List of TickChunk objects to insert
-
-        Example:
-            >>> db = MetadataDB()
-            >>> chunks = [
-            ...     TickChunk(symbol='XAUUSD', time=datetime(2024, 1, 1, i, 0, 0))
-            ...     for i in range(24)
-            ... ]
-            >>> db.insert_rows_batch(chunks)
-        """
-        if not chunks:
+        symbol = normalize_symbol(symbol)
+        if symbol in self._ensured:
             return
+        table = self._table(symbol)
+        with self.conn:
+            # Older releases replaced '-' with '_'. Rename that existing table
+            # when unambiguous so valid legacy instrument histories stay visible.
+            current_name = self._get_table_name(symbol)
+            legacy_name = current_name.replace("-", "_")
+            if legacy_name != current_name:
+                current_exists = self.conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? COLLATE NOCASE",
+                    (current_name,),
+                ).fetchone()
+                legacy_exists = self.conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? COLLATE NOCASE",
+                    (legacy_name,),
+                ).fetchone()
+                if legacy_exists and not current_exists:
+                    self.conn.execute(f'ALTER TABLE "{legacy_name}" RENAME TO {table}')
+            self.conn.execute(
+                f"CREATE TABLE IF NOT EXISTS {table} ("
+                "timestamp INTEGER PRIMARY KEY, "
+                "has_data INTEGER NOT NULL CHECK(has_data IN (0, 1)), "
+                "status TEXT NOT NULL CHECK(status IN ('downloaded','no_data','failed')), "
+                "checked_at INTEGER NOT NULL DEFAULT 0, error TEXT, "
+                "file_size INTEGER, file_mtime_ns INTEGER)"
+            )
+            columns = {
+                row[1] for row in self.conn.execute(f"PRAGMA table_info({table})")
+            }
+            if "status" not in columns:
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN status TEXT")
+            self.conn.execute(
+                f"UPDATE {table} SET status = CASE WHEN has_data = 1 "
+                "THEN 'downloaded' ELSE 'failed' END WHERE status IS NULL"
+            )
+            if "checked_at" not in columns:
+                self.conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN checked_at INTEGER NOT NULL DEFAULT 0"
+                )
+            if "error" not in columns:
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN error TEXT")
+            for name in ("file_size", "file_mtime_ns"):
+                if name not in columns:
+                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} INTEGER")
+        self._ensured.add(symbol)
 
-        # Group chunks by symbol
-        chunks_by_symbol: dict[str, list[TickChunk]] = {}
-        for chunk in chunks:
-            if chunk.symbol not in chunks_by_symbol:
-                chunks_by_symbol[chunk.symbol] = []
-            chunks_by_symbol[chunk.symbol].append(chunk)
+    def _validate_local(self, chunk: TickChunk) -> tuple[DownloadStatus, int, int]:
+        before = chunk.path().stat()
+        raw = validate_payload(chunk.load())
+        after = chunk.path().stat()
+        if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+            raise ValueError(f"Chunk changed while validating: {chunk.path()}")
+        return ("downloaded" if raw else "no_data", after.st_size, after.st_mtime_ns)
 
-        logger.debug(
-            f"Inserting {len(chunks)} rows across {len(chunks_by_symbol)} symbols"
+    def _upsert(
+        self,
+        chunk: TickChunk,
+        status: DownloadStatus,
+        error: str | None,
+        file_size: int | None = None,
+        file_mtime_ns: int | None = None,
+        *,
+        checked_at: int | None = None,
+    ) -> None:
+        self.conn.execute(
+            f"INSERT INTO {self._table(chunk.symbol)} "
+            "(timestamp,has_data,status,checked_at,error,file_size,file_mtime_ns) "
+            "VALUES (?,?,?,?,?,?,?) ON CONFLICT(timestamp) DO UPDATE SET "
+            "has_data=excluded.has_data,status=excluded.status, "
+            "checked_at=excluded.checked_at,error=excluded.error, "
+            "file_size=excluded.file_size,file_mtime_ns=excluded.file_mtime_ns",
+            (
+                int(chunk.time.timestamp()),
+                int(status == "downloaded"),
+                status,
+                (
+                    int(datetime.now(UTC).timestamp())
+                    if checked_at is None
+                    else checked_at
+                ),
+                error,
+                file_size,
+                file_mtime_ns,
+            ),
         )
 
-        # Insert all chunks for each symbol in a single transaction
-        for symbol, symbol_chunks in chunks_by_symbol.items():
-            self._ensure_table_exists(symbol)
-            table_name = self._get_table_name(symbol)
+    def insert_rows(
+        self,
+        chunks: Iterable[TickChunk],
+        *,
+        status: DownloadStatus | None = None,
+        error: str | None = None,
+    ) -> None:
+        """Record a batch; pass a status to distinguish confirmed no-data hours.
 
-            # Prepare data tuples (timestamp, has_data)
-            data = [
-                (int(chunk.time.timestamp()), int(chunk.path().exists()))
-                for chunk in symbol_chunks
-            ]
+        Downloaded files are validated before storing a size/mtime fingerprint
+        used by warm resumes. The compatible one-argument form infers downloaded
+        from an existing file. An absent file is a failure, never proof of no data.
+        """
+        if status is not None and status not in (*_COMPLETE, "failed"):
+            raise ValueError(f"Unknown download status: {status}")
+        with self.conn:
+            for chunk in chunks:
+                self._ensure_table_exists(chunk.symbol)
+                actual_status = status or (
+                    "downloaded" if chunk.path().is_file() else "failed"
+                )
+                file_size, file_mtime_ns = None, None
+                actual_error = error
+                if actual_status == "downloaded":
+                    try:
+                        actual_status, file_size, file_mtime_ns = self._validate_local(
+                            chunk
+                        )
+                    except (OSError, ValueError) as exc:
+                        actual_status, actual_error = "failed", str(exc)
+                self._upsert(
+                    chunk, actual_status, actual_error, file_size, file_mtime_ns
+                )
 
-            # Bulk insert with single commit
-            self.conn.executemany(
-                f"INSERT OR REPLACE INTO {table_name} (timestamp, has_data) VALUES (?, ?)",
-                data,
-            )
-            self.conn.commit()
+    def record_result(
+        self, chunk: TickChunk, status: DownloadStatus, error: str | None = None
+    ) -> None:
+        self.insert_rows([chunk], status=status, error=error)
+
+    def mark_no_data(self, chunk: TickChunk) -> None:
+        self.record_result(chunk, "no_data")
+
+    def get_status(self, chunk: TickChunk) -> DownloadStatus | None:
+        self._ensure_table_exists(chunk.symbol)
+        row = self.conn.execute(
+            f"SELECT status FROM {self._table(chunk.symbol)} WHERE timestamp=?",
+            (int(chunk.time.timestamp()),),
+        ).fetchone()
+        return cast(DownloadStatus, row[0]) if row is not None else None
+
+    def status(
+        self, symbol: str, start: datetime | None = None, end: datetime | None = None
+    ) -> dict[str, int]:
+        """Count each recorded status in the overlapping UTC range."""
+        self._ensure_table_exists(symbol)
+        start = normalize_datetime(start) if start is not None else None
+        end = normalize_datetime(end) if end is not None else None
+        if start is not None and end is not None and end < start:
+            raise ValueError("end must not be before start")
+        counts = {"downloaded": 0, "no_data": 0, "failed": 0, "total": 0}
+        if start is not None and end == start:
+            return counts
+        where, parameters = [], []
+        if start is not None:
+            where.append("timestamp>=?")
+            parameters.append(int(hour_floor(start).timestamp()))
+        if end is not None:
+            where.append("timestamp<?")
+            parameters.append(int(hour_ceil(end).timestamp()))
+        query = f"SELECT status,COUNT(*) FROM {self._table(symbol)}"
+        if where:
+            query += " WHERE " + " AND ".join(where)
+        for status, count in self.conn.execute(query + " GROUP BY status", parameters):
+            counts[status] = count
+            counts["total"] += count
+        return counts
+
+    def iter_pending_batches(
+        self,
+        symbol: str,
+        start: datetime,
+        end: datetime,
+        *,
+        retry_no_data: bool = False,
+        recheck_no_data_after: float | timedelta | None = None,
+        validate_files: bool = True,
+        batch_size: int = 512,
+    ) -> Iterator[list[TickChunk]]:
+        """Yield each scanned batch, including empty batches when all cached.
+
+        Start and end are normalized to UTC and floored, matching the download
+        API. A validated matching file fingerprint avoids repeated decompression.
+        Changed/missing/corrupt files are checked and repaired or retried; valid
+        files left by an interrupted metadata write are recovered without HTTP.
+        Confirmed no-data is retried only when explicitly requested or expired.
+        """
+        if batch_size < 1:
+            raise ValueError("batch_size must be positive")
+        symbol = normalize_symbol(symbol)
+        start, end = normalize_datetime(start), normalize_datetime(end)
+        if end < start:
+            raise ValueError("end must not be before start")
+        current, stop = hour_floor(start), hour_floor(end)
+        self._ensure_table_exists(symbol)
+        seconds = (
+            recheck_no_data_after.total_seconds()
+            if isinstance(recheck_no_data_after, timedelta)
+            else recheck_no_data_after
+        )
+        if seconds is not None and seconds < 0:
+            raise ValueError("recheck_no_data_after must not be negative")
+        cutoff = (
+            datetime.now(UTC).timestamp() - seconds if seconds is not None else None
+        )
+        while current < stop:
+            batch_end = min(stop, current + timedelta(hours=batch_size))
+            rows = {
+                row[0]: (row[1], row[2], row[3], row[4])
+                for row in self.conn.execute(
+                    f"SELECT timestamp,status,checked_at,file_size,file_mtime_ns FROM {self._table(symbol)} "
+                    "WHERE timestamp>=? AND timestamp<? ORDER BY timestamp",
+                    (int(current.timestamp()), int(batch_end.timestamp())),
+                )
+            }
+            pending_chunks = []
+            while current < batch_end:
+                chunk = TickChunk(symbol=symbol, time=current)
+                status, checked_at, file_size, file_mtime_ns = rows.get(
+                    int(current.timestamp()), (None, 0, None, None)
+                )
+                pending = status not in _COMPLETE
+                if status == "no_data":
+                    pending = retry_no_data or (
+                        cutoff is not None and checked_at <= cutoff
+                    )
+                if validate_files:
+                    try:
+                        local_stat = chunk.path().stat()
+                    except FileNotFoundError as exc:
+                        if status == "downloaded":
+                            self.record_result(chunk, "failed", error=str(exc))
+                            pending = True
+                    except OSError as exc:
+                        self.record_result(chunk, "failed", error=str(exc))
+                        pending = True
+                    else:
+                        try:
+                            fingerprint_matches = status in _COMPLETE and (
+                                local_stat.st_size,
+                                local_stat.st_mtime_ns,
+                            ) == (file_size, file_mtime_ns)
+                            local_status = cast(DownloadStatus, status)
+                            if not fingerprint_matches:
+                                local_status, file_size, file_mtime_ns = (
+                                    self._validate_local(chunk)
+                                )
+                                # Revalidating a compressed-empty local cache is
+                                # not a fresh provider observation. Keep the
+                                # original expiry and any requested retry.
+                                observation_time = (
+                                    checked_at
+                                    if status == local_status == "no_data"
+                                    else int(datetime.now(UTC).timestamp())
+                                )
+                                with self.conn:
+                                    self._upsert(
+                                        chunk,
+                                        local_status,
+                                        None,
+                                        file_size,
+                                        file_mtime_ns,
+                                        checked_at=observation_time,
+                                    )
+                                checked_at = observation_time
+                            # A valid published nonempty file wins over every
+                            # older metadata result, including no_data. An empty
+                            # file cannot satisfy an explicit or expired retry.
+                            pending = local_status == "no_data" and (
+                                retry_no_data
+                                or (cutoff is not None and checked_at <= cutoff)
+                            )
+                        except (OSError, ValueError) as exc:
+                            self.record_result(chunk, "failed", error=str(exc))
+                            pending = True
+                if pending:
+                    pending_chunks.append(chunk)
+                current += timedelta(hours=1)
+            yield pending_chunks
+
+    def iter_pending_chunks(
+        self,
+        symbol: str,
+        start: datetime,
+        end: datetime,
+        *,
+        retry_no_data: bool = False,
+        recheck_no_data_after: float | timedelta | None = None,
+        validate_files: bool = True,
+        batch_size: int = 512,
+    ) -> Iterator[TickChunk]:
+        """Flatten iter_pending_batches; bounded by batch_size scanned hours.
+
+        Async producers should use iter_pending_batches and yield to their event
+        loop after every scanned batch, including batches with no pending work.
+        """
+        for batch in self.iter_pending_batches(
+            symbol,
+            start,
+            end,
+            retry_no_data=retry_no_data,
+            recheck_no_data_after=recheck_no_data_after,
+            validate_files=validate_files,
+            batch_size=batch_size,
+        ):
+            yield from batch
 
     def find_not_attempted_chunks(
-        self, symbol: str, start: datetime, end: datetime
+        self, symbol: str, start: datetime, end: datetime, **kwargs: Any
     ) -> list[TickChunk]:
-        """
-        Find all hourly chunks that have not been attempted for download.
+        """Compatibility list wrapper; use iter_pending_chunks for large ranges."""
+        return list(self.iter_pending_chunks(symbol, start, end, **kwargs))
 
-        Generates all hourly datetimes in the range and filters out those
-        that already exist in the database. Useful for resuming interrupted
-        downloads or updating to include recent data.
-
-        Args:
-            symbol: The trading pair symbol
-            start: Start datetime of the range (inclusive, rounded down to hour)
-            end: End datetime of the range (exclusive, rounded down to hour)
-
-        Returns:
-            list[TickChunk]: Chunks for hours that have not been attempted
-
-        Example:
-            >>> db = MetadataDB()
-            >>> start = datetime(2024, 3, 1, 0)
-            >>> end = datetime(2024, 3, 2, 0)
-            >>> chunks = db.find_not_attempted_chunks('XAUUSD', start, end)
-        """
+    def _boundary(self, symbol: str, aggregate: str) -> TickChunk | None:
+        symbol = normalize_symbol(symbol)
         self._ensure_table_exists(symbol)
-        table_name = self._get_table_name(symbol)
-
-        # Generate all hourly datetimes in range
-        all_hours = generate_hourly_datetimes(start, end)
-
-        # Get existing timestamps from database
-        timestamps = [int(dt.timestamp()) for dt in all_hours]
-        placeholders = ",".join("?" * len(timestamps))
-
-        cursor = self.conn.execute(
-            f"""
-            SELECT timestamp FROM {table_name}
-            WHERE timestamp IN ({placeholders})
-            """,
-            timestamps,
-        )
-
-        existing_timestamps = {row[0] for row in cursor.fetchall()}
-
-        # Create chunks for hours not in database
-        not_attempted = [
-            TickChunk(symbol=symbol, time=dt)
-            for dt in all_hours
-            if int(dt.timestamp()) not in existing_timestamps
-        ]
-
-        logger.debug(
-            f"Found {len(not_attempted)} not-attempted chunks for {symbol} from {start.date()} to {end.date()}"
-        )
-
-        return not_attempted
-
-    # ======================== Read API ==============================
-    def first_chunk(self, symbol: str) -> TickChunk | None:
-        """
-        Get the first (earliest) chunk in the database for a symbol.
-
-        Args:
-            symbol: The trading pair symbol
-
-        Returns:
-            TickChunk | None: The earliest chunk if data exists, None otherwise
-
-        Example:
-            >>> db = MetadataDB()
-            >>> first = db.first_chunk('XAUUSD')
-            >>> if first:I
-            ...     print(f"First chunk: {first.time}")
-        """
-        self._ensure_table_exists(symbol)
-        table_name = self._get_table_name(symbol)
-
-        cursor = self.conn.execute(
-            f"""
-            SELECT MIN(timestamp)
-            FROM {table_name}
-            """
-        )
-
-        result = cursor.fetchone()
-        min_timestamp = result[0]
-
-        if min_timestamp is None:
-            logger.debug(f"No data found for symbol: {symbol}")
+        timestamp = self.conn.execute(
+            f"SELECT {aggregate}(timestamp) FROM {self._table(symbol)} "
+            "WHERE status IN ('downloaded','no_data')"
+        ).fetchone()[0]
+        if timestamp is None:
             return None
+        return TickChunk(symbol=symbol, time=datetime.fromtimestamp(timestamp, UTC))
 
-        first_time = datetime.fromtimestamp(min_timestamp, tz=UTC)
-        logger.debug(f"First chunk for {symbol}: {first_time.isoformat()}")
-
-        return TickChunk(symbol=symbol, time=first_time)
+    def first_chunk(self, symbol: str) -> TickChunk | None:
+        """Earliest successfully resolved hour (including confirmed no-data)."""
+        return self._boundary(symbol, "MIN")
 
     def last_chunk(self, symbol: str) -> TickChunk | None:
-        """
-        Get the last (most recent) chunk in the database for a symbol.
-
-        Args:
-            symbol: The trading pair symbol
-
-        Returns:
-            TickChunk | None: The most recent chunk if data exists, None otherwise
-
-        Example:
-            >>> db = MetadataDB()
-            >>> last = db.last_chunk('XAUUSD')
-            >>> if last:
-            ...     print(f"Last chunk: {last.time}")
-        """
-        self._ensure_table_exists(symbol)
-        table_name = self._get_table_name(symbol)
-
-        cursor = self.conn.execute(
-            f"""
-            SELECT MAX(timestamp)
-            FROM {table_name}
-            """
-        )
-
-        result = cursor.fetchone()
-        max_timestamp = result[0]
-
-        if max_timestamp is None:
-            logger.debug(f"No data found for symbol: {symbol}")
-            return None
-
-        last_time = datetime.fromtimestamp(max_timestamp, tz=UTC)
-        logger.debug(f"Last chunk for {symbol}: {last_time.isoformat()}")
-
-        return TickChunk(symbol=symbol, time=last_time)
+        """Latest successfully resolved hour (including confirmed no-data)."""
+        return self._boundary(symbol, "MAX")
 
     def check_for_gaps(self, symbol: str, start: datetime, end: datetime) -> None:
-        """
-        Verify data continuity by checking for gaps in downloaded data within a time range.
-
-        Checks that all hours between start and end exist in the database with no gaps.
-        This should be called before reading data to ensure consistency.
-
-        Args:
-            symbol: The trading pair symbol
-            start: Start datetime of the range (inclusive, rounded down to hour)
-            end: End datetime of the range (exclusive, rounded down to hour)
-
-        Raises:
-            RuntimeError: If gaps are found in the data within the specified range
-            ValueError: If no data exists for the symbol in the specified range
-
-        Example:
-            >>> db = MetadataDB()
-            >>> start = datetime(2024, 3, 1, 0)
-            >>> end = datetime(2024, 3, 2, 0)
-            >>> db.check_for_gaps('XAUUSD', start, end)  # Raises if gaps exist
-        """
+        """Require every overlapping hour to have downloaded or no-data status."""
+        start, end = normalize_datetime(start), normalize_datetime(end)
+        if end < start:
+            raise ValueError("end must not be before start")
+        if end == start:
+            return
+        symbol = normalize_symbol(symbol)
         self._ensure_table_exists(symbol)
-        table_name = self._get_table_name(symbol)
-
-        # Round to hours and normalize to UTC
-        start_hour = start.replace(minute=0, second=0, microsecond=0)
-        if start_hour.tzinfo is None:
-            start_hour = start_hour.replace(tzinfo=UTC)
-        else:
-            start_hour = start_hour.astimezone(UTC)
-
-        end_hour = end.replace(minute=0, second=0, microsecond=0)
-        if end_hour.tzinfo is None:
-            end_hour = end_hour.replace(tzinfo=UTC)
-        else:
-            end_hour = end_hour.astimezone(UTC)
-
-        start_timestamp = int(start_hour.timestamp())
-        end_timestamp = int(end_hour.timestamp())
-
-        # Get count of entries in the specified range
+        first, stop = hour_floor(start), hour_ceil(end)
+        expected = int((stop - first).total_seconds() // 3600)
         cursor = self.conn.execute(
-            f"""
-            SELECT COUNT(*)
-            FROM {table_name}
-            WHERE timestamp >= ? AND timestamp < ?
-            """,
-            (start_timestamp, end_timestamp),
+            f"SELECT timestamp FROM {self._table(symbol)} "
+            "WHERE timestamp>=? AND timestamp<? AND status IN ('downloaded','no_data') "
+            "ORDER BY timestamp",
+            (int(first.timestamp()), int(stop.timestamp())),
         )
-
-        actual_count = cursor.fetchone()[0]
-
-        if actual_count == 0:
-            logger.warning(
-                f"No data found for symbol {symbol} in range {start_hour.date()} to {end_hour.date()}"
-            )
-            raise ValueError(
-                f"No data found for symbol {symbol} in range {start_hour.date()} to {end_hour.date()}"
-            )
-
-        # Generate all expected hours in the range
-        expected_hours = generate_hourly_datetimes(start_hour, end_hour)
-        expected_count = len(expected_hours)
-
-        if actual_count != expected_count:
-            # Find the actual gaps
-            expected_timestamps = {int(dt.timestamp()) for dt in expected_hours}
-
-            cursor = self.conn.execute(
-                f"""
-                SELECT timestamp FROM {table_name}
-                WHERE timestamp >= ? AND timestamp < ?
-                """,
-                (start_timestamp, end_timestamp),
-            )
-
-            existing_timestamps = {row[0] for row in cursor.fetchall()}
-            missing_timestamps = expected_timestamps - existing_timestamps
-
-            missing_dates = [
-                datetime.fromtimestamp(ts, tz=UTC).isoformat()
-                for ts in sorted(missing_timestamps)
-            ]
-
-            logger.error(
-                f"Data gaps detected for {symbol} in range {start_hour.date()} to {end_hour.date()}: "
-                f"{len(missing_timestamps)} missing hours"
-            )
-
+        current = int(first.timestamp())
+        missing_count = 0
+        examples: list[str] = []
+        for (timestamp,) in cursor:
+            while current < timestamp:
+                missing_count += 1
+                if len(examples) < 10:
+                    examples.append(datetime.fromtimestamp(current, UTC).isoformat())
+                current += 3600
+            current = timestamp + 3600
+        while current < int(stop.timestamp()):
+            missing_count += 1
+            if len(examples) < 10:
+                examples.append(datetime.fromtimestamp(current, UTC).isoformat())
+            current += 3600
+        if missing_count:
             raise RuntimeError(
-                f"Data gaps found for symbol {symbol} in range {start_hour.date()} to {end_hour.date()}. "
-                f"Expected {expected_count} entries but found {actual_count}. "
-                f"Missing timestamps: {missing_dates[:10]}"
-                + (" ..." if len(missing_dates) > 10 else "")
+                f"Data gaps for {symbol}: {missing_count} unresolved hours of {expected}. "
+                f"Missing or failed timestamps: {examples}"
+                + (" ..." if missing_count > 10 else "")
             )
 
-        logger.debug(
-            f"No gaps found for {symbol} in range {start_hour.date()} to {end_hour.date()} "
-            f"({expected_count} hours verified)"
+    def iter_available_chunks(
+        self, symbol: str, start: datetime, end: datetime
+    ) -> Iterator[TickChunk]:
+        """Yield downloaded chunks overlapping the exact UTC [start,end) range."""
+        start, end = normalize_datetime(start), normalize_datetime(end)
+        if end < start:
+            raise ValueError("end must not be before start")
+        if end == start:
+            return
+        symbol = normalize_symbol(symbol)
+        self._ensure_table_exists(symbol)
+        cursor = self.conn.execute(
+            f"SELECT timestamp FROM {self._table(symbol)} "
+            "WHERE timestamp>=? AND timestamp<? AND status='downloaded' ORDER BY timestamp",
+            (int(hour_floor(start).timestamp()), int(hour_ceil(end).timestamp())),
         )
+        for (timestamp,) in cursor:
+            yield TickChunk(symbol=symbol, time=datetime.fromtimestamp(timestamp, UTC))
 
     def get_available_chunks(
         self, symbol: str, start: datetime, end: datetime
     ) -> list[TickChunk]:
-        """
-        Get all chunks with available data within a time range.
+        return list(self.iter_available_chunks(symbol, start, end))
 
-        Returns only chunks where has_data=True. Typically called after
-        check_for_gaps() to ensure data continuity.
-
-        Args:
-            symbol: The trading pair symbol
-            start: Start datetime of the range (inclusive, rounded down to hour)
-            end: End datetime of the range (exclusive, rounded down to hour)
-
-        Returns:
-            list[TickChunk]: Chunks with available data, sorted by time
-
-        Example:
-            >>> db = MetadataDB()
-            >>> db.check_for_gaps('XAUUSD')  # Verify no gaps first
-            >>> start = datetime(2024, 3, 1, 0)
-            >>> end = datetime(2024, 3, 2, 0)
-            >>> chunks = db.get_available_chunks('XAUUSD', start, end)
-        """
-        self._ensure_table_exists(symbol)
-        table_name = self._get_table_name(symbol)
-
-        # Round to hours
-        start_hour = start.replace(minute=0, second=0, microsecond=0, tzinfo=UTC)
-        end_hour = end.replace(minute=0, second=0, microsecond=0, tzinfo=UTC)
-
-        start_timestamp = int(start_hour.timestamp())
-        end_timestamp = int(end_hour.timestamp())
-
-        cursor = self.conn.execute(
-            f"""
-            SELECT timestamp FROM {table_name}
-            WHERE timestamp >= ? AND timestamp < ? AND has_data = 1
-            ORDER BY timestamp ASC
-            """,
-            (start_timestamp, end_timestamp),
-        )
-
-        available_chunks = [
-            TickChunk(symbol=symbol, time=datetime.fromtimestamp(row[0], tz=UTC))
-            for row in cursor.fetchall()
-        ]
-
-        logger.debug(f"Retrieved {len(available_chunks)} available chunks for {symbol}")
-
-        return available_chunks
-
-    # ======================= General API ============================
     def close(self) -> None:
-        """Close the database connection."""
         self.conn.close()
-        logger.debug("Closed metadata database connection")
 
     def __enter__(self) -> "MetadataDB":
-        """Context manager entry."""
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        """Context manager exit - closes connection."""
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
         self.close()
